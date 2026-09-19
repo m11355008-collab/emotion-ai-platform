@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: emotion-ai-platform
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.3
+      # 下面這些變數的「值」不要寫在這個檔案裡（這個檔案會被公開上傳到 GitHub）。
+      # 到 Render 網站的 Dashboard → 這個服務 → Environment，用網頁介面另外貼上實際的值：
+      #   GEMINI_API_KEY, WOZ_OPERATOR_PASSWORD, HF_TOKEN, HF_BACKUP_DATASET_REPO
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: WOZ_OPERATOR_PASSWORD
+        sync: false
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_BACKUP_DATASET_REPO
+        sync: false

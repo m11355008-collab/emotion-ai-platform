@@ -1,0 +1,224 @@
+# -*- coding: utf-8 -*-
+"""
+Emotion-AI role-play platform — core prototype (Group A / Group B only).
+
+Scope of this first version, on purpose:
+  - Only covers what's already settled and professor-approved: the A/B
+    system prompts, the three scenarios, and turn-by-turn logging.
+  - Does NOT yet include: pre-test/post-test questionnaires, participant
+    random assignment, or the Group C (human/WoZ) interface — those
+    depend on decisions that are still pending (see 研究方法_定案整合版.docx
+    十、待確認事項總覽). Build those once C group is confirmed.
+
+Run:
+    export GEMINI_API_KEY="your-key-here"
+    python app.py
+
+Then open the local URL Gradio prints (usually http://127.0.0.1:7860).
+"""
+
+import os
+import gradio as gr
+from google import genai
+from google.genai import types
+
+from system_prompts import SYSTEM_PROMPTS, GROUP_LABELS
+from scenarios import SCENARIOS, MIN_TURNS_PER_SCENARIO, MAX_TURNS_PER_SCENARIO
+from logger import log_turn, get_log_path_for_display
+
+MODEL_NAME = "gemini-2.5-flash"
+# 提醒（2026年9月查證）：gemini-2.5-flash 目前是穩定版，但 Google 已公告
+# 2026/10/16 起會停用整個 2.5 系列。如果正式收案時間會晚於這個日期，
+# 建議改用沒有停用時程的穩定版本，例如 "gemini-3.1-flash-lite"。
+# 正式跑實驗前，請先到 https://ai.google.dev/gemini-api/docs/models
+# 確認當下可用的模型名稱，避免收案到一半模型被下架。
+
+
+def get_client() -> genai.Client:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "找不到 GEMINI_API_KEY 環境變數。請先在終端機執行：\n"
+            "  export GEMINI_API_KEY=\"你的金鑰\"\n"
+            "再重新啟動 app.py。"
+        )
+    return genai.Client(api_key=api_key)
+
+
+def build_system_instruction(group: str, scenario: dict) -> str:
+    """Base A/B prompt (unchanged, professor-approved wording) + a short
+    scenario context note appended at the end. The note only tells the
+    model what situation is being discussed — it doesn't alter any of the
+    four numbered behavioural rules in the base prompt."""
+    base = SYSTEM_PROMPTS[group]
+    context_note = (
+        f"\n\n【目前情境】{scenario['title']}。"
+        f"{scenario['opening']}\n"
+        "以上情境資訊僅供你理解對話脈絡，不需要在回覆中覆述情境內容，"
+        "直接針對使用者說的話回應即可。"
+    )
+    return base + context_note
+
+
+def start_session(participant_id, group):
+    if not participant_id.strip():
+        raise gr.Error("請先輸入參與者編號（例如 P001）再開始。")
+
+    scenario = SCENARIOS[0]
+    client = get_client()
+    chat = client.chats.create(
+        model=MODEL_NAME,
+        config=types.GenerateContentConfig(
+            system_instruction=build_system_instruction(group, scenario),
+            temperature=0.9,
+        ),
+    )
+
+    history = [{"role": "assistant", "content": f"【情境 1／{scenario['title']}】\n{scenario['opening']}"}]
+    log_turn(participant_id, group, scenario["id"], scenario["title"], 0, "system", scenario["opening"])
+
+    state = {
+        "participant_id": participant_id.strip(),
+        "group": group,
+        "scenario_index": 0,
+        "turn_index": 0,
+        "chat": chat,
+        "client": client,
+    }
+    status = (
+        f"進行中：情境 1／{scenario['title']}　"
+        f"（本情境已進行 0 回合，滿 {MIN_TURNS_PER_SCENARIO} 回合後可切換下一情境）"
+    )
+    return state, history, status, gr.update(interactive=True), gr.update(visible=False)
+
+
+def send_message(user_message, state, history):
+    if state is None:
+        raise gr.Error("請先按下「開始」設定參與者編號與組別。")
+    if not user_message.strip():
+        return "", state, history, gr.update(), gr.update(visible=False)
+
+    scenario = SCENARIOS[state["scenario_index"]]
+    state["turn_index"] += 1
+
+    # participant turn
+    history = history + [{"role": "user", "content": user_message}]
+    log_turn(state["participant_id"], state["group"], scenario["id"], scenario["title"],
+              state["turn_index"], "participant", user_message)
+
+    # AI turn
+    try:
+        response = state["chat"].send_message(user_message)
+        ai_text = response.text
+    except Exception as e:
+        ai_text = f"（系統錯誤，未取得 AI 回覆：{e}）"
+
+    history = history + [{"role": "assistant", "content": ai_text}]
+    log_turn(state["participant_id"], state["group"], scenario["id"], scenario["title"],
+              state["turn_index"], "ai", ai_text)
+
+    reached_min = state["turn_index"] >= MIN_TURNS_PER_SCENARIO
+    reached_max = state["turn_index"] >= MAX_TURNS_PER_SCENARIO
+    is_last_scenario = state["scenario_index"] == len(SCENARIOS) - 1
+
+    status = f"進行中：情境 {scenario['id']}／{scenario['title']}　（本情境已進行 {state['turn_index']} 回合"
+    status += f"，滿 {MIN_TURNS_PER_SCENARIO} 回合後可切換下一情境）" if not reached_min else "，已達最少回合數，可切換下一情境）"
+
+    show_next_button = reached_min and not (is_last_scenario and reached_max)
+    if is_last_scenario and reached_max:
+        status = "三個情境皆已完成，請進行後測問卷（後測問卷尚未整合進本原型，見 README）。"
+
+    return "", state, history, status, gr.update(visible=show_next_button)
+
+
+def next_scenario(state, history):
+    if state is None:
+        raise gr.Error("請先按下「開始」。")
+    if state["scenario_index"] >= len(SCENARIOS) - 1:
+        raise gr.Error("已經是最後一個情境了。")
+
+    state["scenario_index"] += 1
+    state["turn_index"] = 0
+    scenario = SCENARIOS[state["scenario_index"]]
+
+    chat = state["client"].chats.create(
+        model=MODEL_NAME,
+        config=types.GenerateContentConfig(
+            system_instruction=build_system_instruction(state["group"], scenario),
+            temperature=0.9,
+        ),
+    )
+    state["chat"] = chat
+
+    history = history + [{"role": "assistant", "content": f"【情境 {scenario['id']}／{scenario['title']}】\n{scenario['opening']}"}]
+    log_turn(state["participant_id"], state["group"], scenario["id"], scenario["title"], 0, "system", scenario["opening"])
+
+    status = f"進行中：情境 {scenario['id']}／{scenario['title']}　（本情境已進行 0 回合）"
+    return state, history, status, gr.update(visible=False)
+
+
+def get_download_file(state):
+    if state is None:
+        raise gr.Error("尚未開始任何對話。")
+    path = get_log_path_for_display(state["participant_id"], state["group"])
+    if not os.path.isfile(path):
+        raise gr.Error("目前還沒有任何紀錄可以下載。")
+    return path
+
+
+with gr.Blocks(title="情緒表達 AI 互動平台（原型）") as demo:
+    gr.Markdown("## 生成式 AI 情緒表達學習支架 — 互動原型（A／B 組）")
+    gr.Markdown(
+        "此原型僅涵蓋已定案的 A／B 組系統與對話紀錄，"
+        "尚未整合前測／後測問卷與 C 組（人類／WoZ）介面。"
+    )
+
+    session_state = gr.State(None)
+
+    with gr.Row():
+        participant_id_input = gr.Textbox(label="參與者編號", placeholder="例如 P001")
+        group_input = gr.Radio(
+            choices=list(GROUP_LABELS.keys()),
+            value="A",
+            label="組別（測試用，正式施測時應依隨機分派結果設定）",
+        )
+        start_btn = gr.Button("開始", variant="primary")
+
+    status_box = gr.Markdown("尚未開始。請輸入參與者編號並按下「開始」。")
+    chatbot = gr.Chatbot(label="對話", height=420)
+
+    with gr.Row():
+        msg_input = gr.Textbox(label="輸入訊息", placeholder="輸入後按 Enter 送出", interactive=False, scale=4)
+        send_btn = gr.Button("送出", scale=1)
+
+    next_btn = gr.Button("切換下一情境 ➜", visible=False)
+
+    with gr.Row():
+        download_btn = gr.Button("下載本次對話紀錄（CSV）")
+        download_file = gr.File(label="下載檔案", visible=True)
+
+    start_btn.click(
+        start_session,
+        inputs=[participant_id_input, group_input],
+        outputs=[session_state, chatbot, status_box, msg_input, next_btn],
+    )
+    msg_input.submit(
+        send_message,
+        inputs=[msg_input, session_state, chatbot],
+        outputs=[msg_input, session_state, chatbot, status_box, next_btn],
+    )
+    send_btn.click(
+        send_message,
+        inputs=[msg_input, session_state, chatbot],
+        outputs=[msg_input, session_state, chatbot, status_box, next_btn],
+    )
+    next_btn.click(
+        next_scenario,
+        inputs=[session_state, chatbot],
+        outputs=[session_state, chatbot, status_box, next_btn],
+    )
+    download_btn.click(get_download_file, inputs=[session_state], outputs=[download_file])
+
+
+if __name__ == "__main__":
+    demo.launch()
