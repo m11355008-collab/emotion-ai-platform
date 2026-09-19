@@ -255,6 +255,12 @@ def on_start_experiment(pid_val):
     except RuntimeError as e:
         # 分派清單用完（超過規劃的 90 人）——不能悄悄退回手動分組，直接擋下來讓研究者處理。
         raise gr.Error(str(e))
+    # 分派紀錄立刻備份（不等到參與者跑完全部流程）：這是所有資料裡最不能
+    # 弄錯的一份——萬一免費方案的服務在這位參與者填答中途被重置，分派紀錄
+    # 沒了的話，他重新整理頁面會被系統當成新的人，拿到跟原本不同的組別，
+    # 會直接破壞隨機分派的正確性。backup.backup_files() 本身已經處理過
+    # 「沒設定就跳過、連線失敗就記警告」，這裡不需要額外包 try/except。
+    backup.backup_files([randomization.ASSIGNMENTS_PATH])
     state = new_experiment_state(pid, group_val)
     return [state] + render_all(state)
 
@@ -328,6 +334,9 @@ def on_survey_submit(state, *values):
                                   "content": f"### 🎬 情境 1／{scenario['title']}\n{opening}"}]
                 log_turn(state["participant_id"], state["group"], scenario["id"], scenario["title"],
                           0, "system", opening)
+                # 前測剛結束就備份一次（不等到全部跑完）：免費主機的服務隨時可能
+                # 因為閒置被重置，備份頻率愈高，單次真的遺失的資料量就愈小。
+                _backup_participant_data(state["participant_id"], state["group"])
                 return [state] + render_all(state, chat_history=chat_history)
             else:
                 # 後測問卷全部跑完 → 完成
@@ -442,6 +451,8 @@ def on_next_scenario_or_posttest(state, chat_history):
             participant_id=state["participant_id"], group=state["group"],
             session="post", questionnaires=POSTTEST_QUESTIONNAIRES,
         )
+        # 三情境對話跑完就備份一次，不等到後測問卷也填完——理由同前測結束時的備份。
+        _backup_participant_data(state["participant_id"], state["group"])
         return [state] + render_all(state)
 
     state["chat_scenario_index"] += 1
