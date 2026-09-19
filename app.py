@@ -399,22 +399,37 @@ def on_send_message(user_message, state, chat_history):
         state["_chat_processing"] = False
 
 
+def _noop_render_outputs():
+    """回傳跟 render_all() 輸出數量、順序完全一致，但每一個都是『維持原樣、
+    什麼都不改』的 no-op 更新（gr.update() 不帶任何參數時，前端會保留該元件
+    目前顯示的內容，不會被重置）。
+
+    用在計時器（Timer）觸發、但這次事件其實跟目前畫面無關的情況——例如
+    輪詢當下使用者根本不在對話階段。如果這時候還是呼叫 render_all()，
+    它會依「目前 state」重新算出所有元件該長什麼樣子，包含把問卷欄位
+    重設回『尚未填答』的狀態，這樣會把使用者正在填、還沒送出的表單內容
+    整個清空——這正是之前發生過的真實 bug（計時器每隔幾秒觸發一次，
+    悄悄把還在填的前測問卷清空重填）。"""
+    return [gr.update()] * (MAX_ITEMS * 2 + 3 + 4 + 4)
+
+
 def on_woz_poll(state, chat_history):
     """C 組專用：畫面上的計時器（gr.Timer）每隔幾秒呼叫一次，檢查操作員是否
     已經回覆，一旦有新回覆就補進聊天畫面、解除輸入鎖定。A/B 組、或目前不在
-    對話階段時，這裡什麼都不做，直接原樣回傳（讓 Timer 可以放心對所有 group
-    共用，不用在畫面那層另外判斷）。
+    對話階段時，這裡什麼都不做，回傳全部 no-op（見 _noop_render_outputs），
+    讓 Timer 可以放心對所有 group、所有階段共用，不會不小心動到跟這次事件
+    無關的畫面內容（例如使用者正在填的問卷）。
 
     這裡只負責更新畫面；operator 端的回覆在 on_operator_send() 送出的當下就
     已經寫進 CSV 了（見該函式），這裡不重複記錄，避免同一句操作員回覆被記
     兩次，也不會因為參與者剛好沒開著頁面輪詢，就漏記操作員已經送出的回覆。
     """
     if state is None or state["phase"] != "chat" or state["group"] != "C":
-        return [state] + render_all(state, chat_history=chat_history)
+        return [state] + _noop_render_outputs()
 
     session = woz_session.load_session(state["participant_id"])
     if session is None or len(session["messages"]) <= state["woz_shown_count"]:
-        return [state] + render_all(state, chat_history=chat_history)
+        return [state] + _noop_render_outputs()
 
     new_entries = session["messages"][state["woz_shown_count"]:]
     for entry in new_entries:

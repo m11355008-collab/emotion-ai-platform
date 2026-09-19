@@ -24,6 +24,28 @@ import app  # noqa: E402
 from scenarios import SCENARIOS, MIN_TURNS_PER_SCENARIO  # noqa: E402
 
 
+def check_woz_poll_is_noop_outside_chat():
+    """回歸測試：計時器在使用者還在填問卷（pretest/posttest）、或還沒開始
+    任何流程時觸發，絕對不能動到畫面上任何欄位的值——否則會重現「基本資料
+    填到一半被清空」那個真實發生過的 bug。"""
+    fake_state = {"participant_id": "NOOP001", "group": "A", "phase": "pretest"}
+    result = app.on_woz_poll(fake_state, [])
+    assert result[0] is fake_state, "phase 不是 chat 時，state 應該原封不動傳回去"
+    updates = result[1:]
+    assert len(updates) == 71
+    for u in updates:
+        assert isinstance(u, dict) and "value" not in u, (
+            f"計時器在 pretest 階段觸發時，不應該帶有 value（會覆寫使用者正在填的欄位）：{u}"
+        )
+    print("[OK] 計時器在 pretest 階段觸發時，全部回傳 no-op，不會清空使用者正在填的表單")
+
+    result_none = app.on_woz_poll(None, [])
+    assert result_none[0] is None
+    for u in result_none[1:]:
+        assert isinstance(u, dict) and "value" not in u
+    print("[OK] 尚未開始任何流程（state 為 None）時，計時器觸發也是 no-op")
+
+
 def fill_and_submit_current_questionnaire(state):
     survey = state["survey"]
     q = survey.current_questionnaire
@@ -41,6 +63,8 @@ def fill_and_submit_current_questionnaire(state):
 
 
 def run():
+    check_woz_poll_is_noop_outside_chat()
+
     data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
     if os.path.isdir(data_dir):
         shutil.rmtree(data_dir)
