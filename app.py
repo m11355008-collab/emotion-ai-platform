@@ -39,6 +39,11 @@ import backup
 WOZ_POLL_INTERVAL_SECONDS = 3  # 參與者畫面輪詢操作員回覆的頻率
 OPERATOR_PASSWORD = os.environ.get("WOZ_OPERATOR_PASSWORD")  # None＝操作員頁面暫時無法登入，須先設定
 
+# 服務啟動時，先嘗試把分派紀錄從備份還原回來（見 backup.restore_file 的說明）。
+# 這裡刻意放在模組載入時、gr.Blocks 建構之前執行一次，確保第一位參與者連進來
+# 之前，本機的分派紀錄就已經是最新狀態，不會出現「服務重啟後從頭分派」的問題。
+backup.restore_file(os.path.basename(randomization.ASSIGNMENTS_PATH), randomization.ASSIGNMENTS_PATH)
+
 MODEL_NAME = "gemini-2.5-flash"
 # 提醒（2026年9月查證）：gemini-2.5-flash 目前是穩定版，但 Google 已公告
 # 2026/10/16 起會停用整個 2.5 系列。如果正式收案時間會晚於這個日期，
@@ -229,7 +234,7 @@ def render_all(state, chat_history=None, survey_error=None, preserve_survey_valu
         updates.append(gr.update(interactive=not awaiting_operator))
         show_next = (reached_min and not awaiting_operator
                      and not (is_last_scenario and state["chat_turn_index"] >= MAX_TURNS_PER_SCENARIO))
-        updates.append(gr.update(visible=show_next, interactive=True))
+        updates.append(gr.update(visible=show_next, interactive=True, value="切換下一情境 ➜"))
     else:
         updates.append(gr.update())
         updates.append(gr.update())
@@ -576,7 +581,33 @@ def on_operator_load(pid_val):
     status = f"已載入 {pid}｜情境：{session['scenario_title']}"
     status += "｜⏳ 正在等待你回覆" if session["awaiting_operator"] else "｜目前沒有等待中的訊息"
 
-    return pid, _format_transcript_markdown(session), gr.update(choices=choices, value=None), status
+    return pid, _format_transcript_markdown(session), gr.update(choices=choices, value=None), status, session["scenario_id"]
+
+
+def on_operator_poll_loaded(selected_pid, loaded_scenario_id):
+    """操作員畫面的計時器除了刷新待回覆清單，也順便刷新『目前已載入這位
+    參與者』的對話紀錄，不用手動按「載入」才看得到參與者切換情境、或送出
+    新訊息後的最新狀態。這是為了修正一個真實發生過的問題：參與者切換到
+    下一個情境後，如果操作員沒有重新手動載入，回覆選單會停在舊情境，
+    可能選到跟新情境語境不符的句子。
+
+    只有在偵測到情境真的換了（session 的 scenario_id 跟上次載入時不一樣）
+    才會重新整理回覆選單、並清空目前選取的值；情境沒變的話，選單維持
+    原樣，避免操作員正在選的內容被每 3 秒就平白清掉一次。"""
+    if not selected_pid:
+        return gr.update(), gr.update(), loaded_scenario_id
+    session = woz_session.load_session(selected_pid)
+    if session is None:
+        return gr.update(), gr.update(), loaded_scenario_id
+
+    transcript_update = gr.update(value=_format_transcript_markdown(session))
+
+    if session["scenario_id"] != loaded_scenario_id:
+        specific, universal = reply_bank.get_reply_bank(session["scenario_id"])
+        choices = specific + ["—— 以下為通用回覆 ——"] + universal
+        return transcript_update, gr.update(choices=choices, value=None), session["scenario_id"]
+
+    return transcript_update, gr.update(), loaded_scenario_id
 
 
 def on_operator_send(pid, reply_text):
@@ -737,6 +768,7 @@ with gr.Blocks(title="情緒表達 AI 互動平台（完整流程）") as demo:
                     operator_pid_input = gr.Textbox(label="要回覆的參與者編號（從上面清單複製）")
                     operator_load_btn = gr.Button("載入這位參與者")
                 operator_selected_pid = gr.State(None)
+                operator_loaded_scenario_id = gr.State(None)
                 operator_load_status = gr.Markdown()
 
                 gr.Markdown("### 對話紀錄（唯讀）")
@@ -755,7 +787,8 @@ with gr.Blocks(title="情緒表達 AI 互動平台（完整流程）") as demo:
             )
             operator_load_btn.click(
                 on_operator_load, inputs=[operator_pid_input],
-                outputs=[operator_selected_pid, operator_transcript, operator_reply_radio, operator_load_status],
+                outputs=[operator_selected_pid, operator_transcript, operator_reply_radio, operator_load_status,
+                         operator_loaded_scenario_id],
             )
             operator_send_btn.click(
                 on_operator_send, inputs=[operator_selected_pid, operator_reply_radio],
@@ -765,6 +798,10 @@ with gr.Blocks(title="情緒表達 AI 互動平台（完整流程）") as demo:
             # 待回覆清單定期自動更新，操作員不用一直手動重新整理才看得到新進來的訊息。
             operator_poll_timer = gr.Timer(WOZ_POLL_INTERVAL_SECONDS)
             operator_poll_timer.tick(on_operator_refresh_pending, inputs=None, outputs=[pending_display])
+            operator_poll_timer.tick(
+                on_operator_poll_loaded, inputs=[operator_selected_pid, operator_loaded_scenario_id],
+                outputs=[operator_transcript, operator_reply_radio, operator_loaded_scenario_id],
+            )
 
 
 if __name__ == "__main__":

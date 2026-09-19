@@ -95,8 +95,9 @@ def run():
 
             # 2. 操作員載入這位參與者、挑一句回覆送出
             load_result = app.on_operator_load(pid)
-            loaded_pid, transcript_md, reply_choices_update, load_status = load_result
+            loaded_pid, transcript_md, reply_choices_update, load_status, loaded_scenario_id = load_result
             assert loaded_pid == pid
+            assert loaded_scenario_id == scenario["id"]
             choices = reply_choices_update["choices"]
             first_reply = choices[0]  # 一定是情境專屬回覆（見 reply_bank 順序），不是分隔線
             send_op_result = app.on_operator_send(pid, first_reply)
@@ -117,16 +118,28 @@ def run():
         render = app.render_all(state, chat_history=chat_history)
         next_btn_update = render[66]
         assert next_btn_update.get("visible") is True, "跑完最少回合數後，next_btn 應該顯示"
+        assert next_btn_update.get("value") == "切換下一情境 ➜", (
+            f"next_btn 的文字應該要是正常標籤，不能卡在『處理中』：{next_btn_update.get('value')}"
+        )
 
+        old_scenario_id = scenario["id"]
         next_result = app.on_next_scenario_or_posttest(state, chat_history)
         state = next_result[0]
         if scenario_idx < len(SCENARIOS) - 1:
             chat_history = next_result[1 + 64]["value"]
             assert state["phase"] == "chat"
             assert state["chat_scenario_index"] == scenario_idx + 1
+
+            # 回歸測試：操作員畫面如果還停留在「上一個情境」沒有手動重新載入，
+            # 輪詢應該要自動偵測到情境已經換了，重新整理回覆選單。
+            new_scenario = SCENARIOS[scenario_idx + 1]
+            transcript_upd, choices_upd, new_loaded_scenario_id = app.on_operator_poll_loaded(pid, old_scenario_id)
+            assert new_loaded_scenario_id == new_scenario["id"], "操作員輪詢應該偵測到情境已切換"
+            assert choices_upd["choices"][0] != "", "情境切換後，回覆選單應該重新整理成新情境的內容"
+            assert choices_upd["value"] is None, "情境切換後，之前選取的值應該被清空，避免誤送舊情境的句子"
         else:
             assert state["phase"] == "posttest", "三個情境都跑完後應該進入後測"
-    print("[OK] 三個情境全部跑完，正確進入後測問卷階段")
+    print("[OK] 三個情境全部跑完，正確進入後測問卷階段，next_btn 標籤正常、操作員畫面會自動跟著情境切換")
 
     while state["phase"] == "posttest":
         state = fill_and_submit_current_questionnaire(state)

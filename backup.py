@@ -75,3 +75,35 @@ def backup_files(file_paths: list) -> bool:
     except Exception as e:  # 備份是額外保險，任何原因失敗都不能影響參與者的流程
         logger.warning(f"備份到 Hugging Face Dataset 失敗（不影響參與者當下的流程，資料仍在本機 data/ 內）：{e}")
         return False
+
+
+def restore_file(filename: str, local_path: str) -> bool:
+    """服務啟動時呼叫：如果備份 Dataset 裡有這個檔案的最新版本，下載回本機
+    對應路徑，蓋掉本機現有的（如果有的話）。
+
+    這是因應 Render 等免費主機「服務重啟會清空本機檔案」的關鍵措施：分派
+    紀錄（randomization.ASSIGNMENTS_PATH）每次分派就已經即時備份（見
+    app.py 的 on_start_experiment），所以只要在服務啟動時把它還原回來，
+    就不會出現「服務重啟一次，所有人的分派紀錄就消失、下一位參與者被當成
+    全新的第一位、重新從分派清單最前面開始分」的問題——不需要管理者手動
+    介入分配。
+
+    找不到備份（例如第一次啟動、還沒有任何備份）或連線失敗時，安靜地回傳
+    False、不丟出例外——這種情況下就是從全新的狀態開始，這本身就是合理
+    的行為，不應該讓啟動流程因此掛掉。"""
+    if not is_configured():
+        return False
+    try:
+        from huggingface_hub import hf_hub_download
+        downloaded_path = hf_hub_download(
+            repo_id=HF_BACKUP_DATASET_REPO, repo_type="dataset",
+            filename=filename, token=HF_TOKEN,
+        )
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+        import shutil
+        shutil.copy(downloaded_path, local_path)
+        logger.info(f"已從 Hugging Face Dataset 還原 {filename} 到 {local_path}")
+        return True
+    except Exception as e:
+        logger.warning(f"從 Hugging Face Dataset 還原 {filename} 失敗（可能只是還沒有任何備份，屬正常情況）：{e}")
+        return False
